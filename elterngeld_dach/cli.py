@@ -1,130 +1,205 @@
 # -*- coding: utf-8 -*-
 """
-Kommandozeilen-Interface (CLI) für dach-elterngeld.
+CLI-Schnittstelle für dach-elterngeld:
+DACH Elterngeld-, Mutterschutz- & Elternzeit-Planer 2026.
 """
 
 import argparse
 import json
 import sys
-from .calculator import (
-    calculate_germany_elterngeld,
-    calculate_austria_benefits,
-    calculate_switzerland_benefits,
-    calculate_de_replacement_rate,
-)
+from .beeg import calculate_beeg, calculate_ersatzrate
+from .kbgg import calculate_kbgg
+from .eog import calculate_eog
+from .planner import evaluate_plan
+
+
+def format_currency(val: float, curr: str = "€") -> str:
+    return f"{val:,.2f} {curr}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def cmd_de(args):
+    res = calculate_beeg(
+        netto_voreinkommen=args.netto,
+        zve=args.zve,
+        has_geschwisterbonus=args.geschwisterbonus,
+        mehrlinge_count=args.mehrlinge,
+        teilzeit_netto=args.teilzeit_netto,
+        teilzeit_stunden=args.teilzeit_stunden,
+        mutterschaftsgeld_tagessatz=args.muschgeld,
+        ist_mutter=args.mutter,
+    )
+
+    if args.json:
+        data = {
+            "country": "DE",
+            "netto": res.netto_voreinkommen,
+            "ersatzrate_pct": res.ersatzrate_prozent,
+            "is_eligible": res.is_eligible,
+            "basis_elterngeld": res.basis_elterngeld,
+            "elterngeld_plus": res.elterngeld_plus,
+            "geschwisterbonus": res.geschwisterbonus,
+            "mehrlingszuschlag_basis": res.mehrlingszuschlag_basis,
+            "hinweise": res.hinweise,
+        }
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    print("=" * 65)
+    print("🇩🇪 DEUTSCHLAND: ELTERNGELD & ELTERNZEIT 2026 (BEEG)")
+    print("=" * 65)
+    print(f"Netto-Voreinkommen (12 Monatsmittel): {format_currency(res.netto_voreinkommen)}")
+    print(f"Zu versteuerndes Einkommen (zvE):    {format_currency(res.zve)}")
+    print(f"Gesetzliche Ersatzrate:              {res.ersatzrate_prozent:.1f} %")
+    print(f"Geringverdiener-Bonus aktiv:         {'Ja (< 1.000 €)' if res.is_geringverdiener else 'Nein'}")
+    print(f"Degressive Absenkung aktiv:          {'Ja (> 1.200 €)' if res.is_degressiv else 'Nein'}")
+    print("-" * 65)
+    if not res.is_eligible:
+        print(f"❌ KEIN ANSPRUCH: {res.ineligibility_reason}")
+    else:
+        print(f"Basiselterngeld pro Monat:           {format_currency(res.basis_elterngeld)}")
+        print(f"ElterngeldPlus pro Monat:            {format_currency(res.elterngeld_plus)}")
+        if res.has_geschwisterbonus:
+            print(f"Inklusive Geschwisterbonus:          +{format_currency(res.geschwisterbonus)} / Monat")
+        if res.mehrlinge_count > 1:
+            print(f"Inklusive Mehrlingszuschlag:         +{format_currency(res.mehrlingszuschlag_basis)} / Monat")
+        if res.teilzeit_netto > 0:
+            print(f"Teilzeit-Zuverdienst berücksichtigt: {format_currency(res.teilzeit_netto)} ({res.teilzeit_stunden} h/Woche)")
+        if res.mutterschaftsgeld_anrechnung > 0:
+            print(f"Mutterschaftsgeld-Anrechnung (M1–2): {format_currency(res.mutterschaftsgeld_anrechnung)} / Monat")
+
+    if res.hinweise:
+        print("-" * 65)
+        print("Hinweise:")
+        for h in res.hinweise:
+            print(f"• {h}")
+    print("=" * 65)
+
+
+def cmd_at(args):
+    res = calculate_kbgg(
+        netto_monat=args.netto,
+        ist_kaiserschnitt_oder_mehrling=args.kaiserschnitt,
+        pauschale_tage=args.tage,
+        beide_eltern=args.beide,
+        inkl_sonderzahlungen=not args.ohne_sz,
+    )
+
+    if args.json:
+        data = {
+            "country": "AT",
+            "netto_monat": res.netto_monat,
+            "wochengeld_tagessatz": res.wochengeld_tagessatz,
+            "wochengeld_monat": res.wochengeld_monat,
+            "wochengeld_gesamt": res.wochengeld_gesamt,
+            "ea_kbg_tagessatz": res.ea_kbg_tagessatz,
+            "ea_kbg_monat": res.ea_kbg_monat_30,
+            "ea_kbg_gesamt_max": res.ea_kbg_gesamt_max,
+            "pauschale_tagessatz": res.pauschale_tagessatz,
+            "pauschale_monat": res.pauschale_monat_30,
+            "pauschale_gesamt": res.pauschale_gesamt,
+            "hinweise": res.hinweise,
+        }
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    print("=" * 65)
+    print("🇦🇹 ÖSTERREICH: WOCHENGELD & KINDERBETREUUNGSGELD 2026")
+    print("=" * 65)
+    print(f"Nettoeinkommen / Monat:              {format_currency(res.netto_monat)}")
+    print("-" * 65)
+    print("1. WOCHENGELD (§ 162 ASVG):")
+    print(f"   Tagessatz:                        {format_currency(res.wochengeld_tagessatz)}")
+    print(f"   Schutzfrist-Dauer:                {res.wochengeld_wochen} Wochen")
+    print(f"   Gesamtanspruch Wochengeld:        {format_currency(res.wochengeld_gesamt)}")
+    print("-" * 65)
+    print("2. EINKOMMENSABHÄNGIGES KBG (80 %):")
+    print(f"   Tagessatz (max. 73,88 €):         {format_currency(res.ea_kbg_tagessatz)}")
+    print(f"   Monatsbetrag (30 Tage):           {format_currency(res.ea_kbg_monat_30)}")
+    print(f"   Gesamt bei {res.ea_kbg_max_tage} Tagen Bezug:      {format_currency(res.ea_kbg_gesamt_max)}")
+    print(f"   Zuverdienstgrenze:                {format_currency(res.ea_zuverdienstgrenze)} / Jahr")
+    print("-" * 65)
+    print("3. PAUSCHALES KBG-KONTO (FLEXIBEL):")
+    print(f"   Gewählte Bezugstage:              {res.pauschale_tage} Tage")
+    print(f"   Tagessatz:                        {format_currency(res.pauschale_tagessatz)}")
+    print(f"   Monatsbetrag (30 Tage):           {format_currency(res.pauschale_monat_30)}")
+    print(f"   Gesamtsumme Konto:                {format_currency(res.pauschale_gesamt)}")
+    print(f"   Zuverdienstgrenze:                {format_currency(res.pauschale_zuverdienstgrenze)} / Jahr")
+    print("=" * 65)
+
+
+def cmd_ch(args):
+    res = calculate_eog(monatslohn=args.lohn)
+
+    if args.json:
+        data = {
+            "country": "CH",
+            "monatslohn": res.monatslohn,
+            "massgebender_lohn": res.massgebender_lohn,
+            "mse_tagessatz": res.mse_tagessatz,
+            "mse_gesamt_14w": res.mse_gesamt,
+            "vaterschaft_tagessatz": res.vaterschaft_tagessatz,
+            "vaterschaft_gesamt_2w": res.vaterschaft_gesamt,
+            "hinweise": res.hinweise,
+        }
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    print("=" * 65)
+    print("🇨🇭 SCHWEIZ: MUTTERSCHAFTS- & VATERSCHAFTSENTSCHÄDIGUNG 2026")
+    print("=" * 65)
+    print(f"Monatslohn:                          {format_currency(res.monatslohn, 'CHF')}")
+    print(f"Maximal anrechenbarer Lohn:          {format_currency(res.massgebender_lohn, 'CHF')}")
+    print("-" * 65)
+    print("1. MUTTERSCHAFTSENTSCHÄDIGUNG (MSE):")
+    print(f"   Taggeld (80 %, max. 220 CHF):     {format_currency(res.mse_tagessatz, 'CHF')} / Tag")
+    print(f"   Dauer:                            {res.mse_wochen} Wochen ({res.mse_tage} Tage)")
+    print(f"   Gesamtentschädigung:              {format_currency(res.mse_gesamt, 'CHF')}")
+    print("-" * 65)
+    print("2. URLAUB FÜR DEN ANDEREN ELTERNTEIL (VATERSCHAFTSURLAUB):")
+    print(f"   Taggeld:                          {format_currency(res.vaterschaft_tagessatz, 'CHF')} / Tag")
+    print(f"   Dauer:                            2 Wochen (14 Taggelder / 10 Arbeitstage)")
+    print(f"   Gesamtentschädigung:              {format_currency(res.vaterschaft_gesamt, 'CHF')}")
+    print("=" * 65)
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="dach-elterngeld",
-        description="DACH Elterngeld-, Mutterschutz- & Elternzeit-Rechner 2026 (BEEG, MSchG, KBGG, EOG)",
+        description="DACH Elterngeld-, Mutterschutz- & Elternzeit-Planer 2026 (BEEG, MSchG & Schweizer EO/VAEg)",
     )
-    subparsers = parser.add_subparsers(dest="country", help="Land auswählen (de, at, ch)")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Subcommand: DE
-    de_parser = subparsers.add_parser("de", help="Deutschland (BEEG & MuSchG)")
-    de_parser.add_argument("--netto", type=float, required=True, help="Monatliches Nettoeinkommen vor Geburt in EUR")
-    de_parser.add_argument("--teilzeit-netto", type=float, default=0.0, help="Geplantes Nettoeinkommen in Teilzeit waehrend Elternzeit")
-    de_parser.add_argument("--teilzeit-stunden", type=float, default=0.0, help="Geplante Wochenarbeitsstunden (max. 32 Std.)")
-    de_parser.add_argument("--geschwisterbonus", action="store_true", help="Geschwisterbonus aktivieren (Kind unter 3 bzw. 2 Kinder unter 6)")
-    de_parser.add_argument("--mehrlinge", type=int, default=1, help="Anzahl der neugeborenen Kinder (Standard: 1)")
-    de_parser.add_argument("--zv-einkommen", type=float, default=0.0, help="Zu versteuerndes Jahreseinkommen (Grenze: 175.000 EUR)")
-    de_parser.add_argument("--mutterschaftsgeld", type=float, default=0.0, help="Monatliches Mutterschaftsgeld zur Anrechnung")
-    de_parser.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    # Subcommand DE
+    p_de = subparsers.add_parser("de", help="Deutschland: Elterngeld nach BEEG berechnen")
+    p_de.add_argument("--netto", type=float, required=True, help="Durchschnittliches Nettoeinkommen vor Geburt (€)")
+    p_de.add_argument("--zve", type=float, default=0.0, help="Zu versteuerndes Einkommen im Vorjahr (€)")
+    p_de.add_argument("--geschwisterbonus", action="store_true", help="Geschwisterbonus beanspruchen (+10 %%, min 75 €)")
+    p_de.add_argument("--mehrlinge", type=int, default=1, help="Anzahl Kinder bei Mehrlingsgeburt (z.B. 2 für Zwillinge)")
+    p_de.add_argument("--teilzeit-netto", type=float, default=0.0, help="Monatliches Netto-Einkommen in Teilzeit (€)")
+    p_de.add_argument("--teilzeit-stunden", type=float, default=0.0, help="Geplante Wochenarbeitszeit (max. 32 h)")
+    p_de.add_argument("--muschgeld", type=float, default=0.0, help="Mutterschaftsgeld-Tagessatz der Krankenkasse + AG-Zuschuss")
+    p_de.add_argument("--mutter", action="store_true", help="Berechnung für die Mutter (mit Schutzfrist)")
+    p_de.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    p_de.set_defaults(func=cmd_de)
 
-    # Subcommand: AT
-    at_parser = subparsers.add_parser("at", help="Oesterreich (MSchG & KBGG)")
-    at_parser.add_argument("--netto", type=float, required=True, help="Monatliches Nettoeinkommen in EUR")
-    at_parser.add_argument("--kaiserschnitt-mehrling", action="store_true", help="Kaiserschnitt, Fruehgeburt oder Mehrlinge (12 Wochen Schutzfrist nach Geburt)")
-    at_parser.add_argument("--modell", choices=["ea", "konto"], default="ea", help="KBG-Modell: ea (einkommensabhaengig) oder konto (pauschal)")
-    at_parser.add_argument("--tage", type=int, default=365, help="Bezugstage fuer pauschales KBG-Konto (365 bis 1063)")
-    at_parser.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    # Subcommand AT
+    p_at = subparsers.add_parser("at", help="Österreich: Wochengeld & KBG berechnen")
+    p_at.add_argument("--netto", type=float, required=True, help="Monatliches Nettoeinkommen vor Mutterschutz (€)")
+    p_at.add_argument("--kaiserschnitt", action="store_true", help="Kaiserschnitt, Frühgeburt oder Mehrlinge (12 Wochen Schutz)")
+    p_at.add_argument("--tage", type=int, default=365, help="Tage für KBG-Konto (365 bis 1063)")
+    p_at.add_argument("--beide", action="store_true", help="Aufteilung auf beide Elternteile (bis 426 bzw. 1063 Tage)")
+    p_at.add_argument("--ohne-sz", action="store_true", help="Ohne Sonderzahlungs-Zuschlag")
+    p_at.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    p_at.set_defaults(func=cmd_at)
 
-    # Subcommand: CH
-    ch_parser = subparsers.add_parser("ch", help="Schweiz (EOG & VAEg)")
-    ch_parser.add_argument("--brutto", type=float, required=True, help="Monatlicher Bruttolohn vor Niederkunft in CHF")
-    ch_parser.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    # Subcommand CH
+    p_ch = subparsers.add_parser("ch", help="Schweiz: MSE & Vaterschaftsentschädigung berechnen")
+    p_ch.add_argument("--lohn", type=float, required=True, help="Monatslohn vor der Geburt (CHF)")
+    p_ch.add_argument("--json", action="store_true", help="Ausgabe als JSON")
+    p_ch.set_defaults(func=cmd_ch)
 
     args = parser.parse_args()
-
-    if not args.country:
-        parser.print_help()
-        sys.exit(0)
-
-    if args.country == "de":
-        res = calculate_germany_elterngeld(
-            net_income_before=args.netto,
-            part_time_net_during=args.teilzeit_netto,
-            part_time_hours_per_week=args.teilzeit_stunden,
-            has_qualifying_siblings=args.geschwisterbonus,
-            multiple_birth_count=args.mehrlinge,
-            taxable_yearly_income=args.zv_einkommen,
-            maternity_benefit_monthly=args.mutterschaftsgeld,
-        )
-        if args.json:
-            print(json.dumps(res, indent=2, ensure_ascii=False))
-        else:
-            print("=" * 65)
-            print("🇩🇪 DEUTSCHLAND: ELTERNGELD-BERECHNUNG 2026 (BEEG)")
-            print("=" * 65)
-            if not res["eligible"]:
-                print(f"❌ KEIN ANSPRUCH: {res['reason']}")
-                sys.exit(1)
-            print(f"Nettoeinkommen vor Geburt : {res['net_income_before']:,.2f} EUR")
-            print(f"Ersatzrate gem. BEEG       : {res['replacement_rate'] * 100:.1f} Prozent")
-            print(f"Basiselterngeld / Monat   : {res['monthly_basis_elterngeld']:,.2f} EUR (max. 12-14 Monate)")
-            print(f"ElterngeldPlus / Monat     : {res['monthly_plus_elterngeld']:,.2f} EUR (max. 24-28 Monate)")
-            if res["sibling_bonus_basis"] > 0:
-                print(f"inkl. Geschwisterbonus     : +{res['sibling_bonus_basis']:,.2f} EUR / Monat")
-            if res["multiples_bonus_basis"] > 0:
-                print(f"inkl. Mehrlingszuschlag    : +{res['multiples_bonus_basis']:,.2f} EUR / Monat")
-            if res["maternity_benefit_monthly"] > 0:
-                print(f"Auszahlung im Mutterschutz : {res['payout_during_mutterschutz']:,.2f} EUR")
-            if res["partnership_bonus_eligible"]:
-                print("✅ Partnerschaftsbonus-Monate moeglich (Teilzeit 24-32 Std./Woche erfuellt)")
-            print("=" * 65)
-
-    elif args.country == "at":
-        model_name = "earnings_based" if args.modell == "ea" else "account"
-        res = calculate_austria_benefits(
-            monthly_net_income=args.netto,
-            is_caesarean_or_multiples=args.kaiserschnitt_mehrling,
-            selected_kbg_model=model_name,
-            kbg_account_days=args.tage,
-        )
-        if args.json:
-            print(json.dumps(res, indent=2, ensure_ascii=False))
-        else:
-            print("=" * 65)
-            print("🇦🇹 OESTERREICH: WOCHENGELD & KINDERBETREUUNGSGELD 2026")
-            print("=" * 65)
-            print(f"Monatliches Netto         : {res['monthly_net_income']:,.2f} EUR")
-            print(f"Wochengeld Tagessatz      : {res['wochengeld_daily']:,.2f} EUR / Tag ({res['wochengeld_protection_weeks']} Wochen Schutzfrist)")
-            print(f"Wochengeld Gesamt         : {res['wochengeld_total']:,.2f} EUR")
-            print(f"KBG-Modell                : {res['kbg_model']}")
-            print(f"KBG Tagessatz             : {res['kbg_daily_rate']:,.2f} EUR / Tag")
-            print(f"KBG Monatsbetrag          : {res['kbg_monthly']:,.2f} EUR / Monat")
-            print(f"KBG Gesamtsumme (1 Elter) : {res['kbg_total_single']:,.2f} EUR")
-            print(f"Zuverdienstgrenze         : {res['kbg_additional_income_limit']:,.2f} EUR / Jahr")
-            print("=" * 65)
-
-    elif args.country == "ch":
-        res = calculate_switzerland_benefits(
-            monthly_gross_salary=args.brutto,
-        )
-        if args.json:
-            print(json.dumps(res, indent=2, ensure_ascii=False))
-        else:
-            print("=" * 65)
-            print("🇨🇭 SCHWEIZ: MUTTERSCHAFTS- & VATERSCHAFTSENTSCHAEDIGUNG 2026")
-            print("=" * 65)
-            print(f"Monatlicher Bruttolohn    : {res['monthly_gross_salary']:,.2f} CHF")
-            print(f"Taggeld (80 Prozent)      : {res['daily_mse']:,.2f} CHF / Kalendertag")
-            if res["is_capped"]:
-                print(f"Deckelung aktiv           : Max. {res['cap_limit_daily']:,.2f} CHF / Tag erreicht")
-            print(f"Mutterschaftsentschaed.   : {res['mse_total_payout']:,.2f} CHF ({res['mse_duration_days']} Tage / 14 Wochen)")
-            print(f"Vaterschaftsurlaub Entsch.: {res['paternity_total_payout']:,.2f} CHF ({res['paternity_duration_days']} Tage / 2 Wochen)")
-            print("=" * 65)
+    args.func(args)
 
 
 if __name__ == "__main__":

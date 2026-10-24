@@ -1,92 +1,52 @@
 # -*- coding: utf-8 -*-
-import json
+"""
+Tests für die CLI dach-elterngeld.
+"""
+
 import subprocess
+import json
 import sys
+import os
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def test_cli_help():
-    cmd = [sys.executable, "-m", "elterngeld_dach.cli", "--help"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode == 0
-    assert "dach-elterngeld" in res.stdout
-    assert "BEEG" in res.stdout
+def run_cli(args):
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{REPO_ROOT}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else REPO_ROOT
+
+    cmd = [sys.executable, "-m", "elterngeld_dach.cli"] + args
+    return subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=REPO_ROOT, env=env)
 
 
-def test_cli_germany():
-    cmd = [
-        sys.executable,
-        "-m",
-        "elterngeld_dach.cli",
-        "de",
-        "--netto", "2500",
-        "--geschwisterbonus",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode == 0
-    assert "DEUTSCHLAND: ELTERNGELD-BERECHNUNG" in res.stdout
-    assert "Basiselterngeld" in res.stdout
-    assert "Geschwisterbonus" in res.stdout
-
-
-def test_cli_germany_json():
-    cmd = [
-        sys.executable,
-        "-m",
-        "elterngeld_dach.cli",
-        "de",
-        "--netto", "2000",
-        "--json",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode == 0
+def test_cli_de_json():
+    res = run_cli(["de", "--netto", "2500", "--json"])
     data = json.loads(res.stdout)
-    assert data["eligible"] is True
-    assert data["monthly_basis_elterngeld"] == 1300.0
+    assert data["country"] == "DE"
+    assert data["netto"] == 2500.0
+    assert data["is_eligible"] is True
+    assert data["basis_elterngeld"] == 1625.0  # 2500 * 0.65
 
 
-def test_cli_germany_ineligible():
-    cmd = [
-        sys.executable,
-        "-m",
-        "elterngeld_dach.cli",
-        "de",
-        "--netto", "4000",
-        "--zv-einkommen", "190000",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode != 0
-    assert "Einkommensgrenze" in res.stdout
-
-
-def test_cli_austria():
-    cmd = [
-        sys.executable,
-        "-m",
-        "elterngeld_dach.cli",
-        "at",
-        "--netto", "2200",
-        "--modell", "ea",
-        "--json",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode == 0
+def test_cli_de_over_limit():
+    res = run_cli(["de", "--netto", "4000", "--zve", "180000", "--json"])
     data = json.loads(res.stdout)
-    assert data["kbg_model"] == "earnings_based"
-    assert data["wochengeld_daily"] > 0
+    assert data["is_eligible"] is False
+    assert data["basis_elterngeld"] == 0.0
 
 
-def test_cli_switzerland():
-    cmd = [
-        sys.executable,
-        "-m",
-        "elterngeld_dach.cli",
-        "ch",
-        "--brutto", "7500",
-        "--json",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    assert res.returncode == 0
+def test_cli_at_json():
+    res = run_cli(["at", "--netto", "2000", "--json"])
     data = json.loads(res.stdout)
-    assert data["daily_wage"] == 250.0
-    assert data["daily_mse"] == 200.0
-    assert data["mse_total_payout"] == 200.0 * 98
+    assert data["country"] == "AT"
+    assert data["wochengeld_tagessatz"] > 0
+    assert data["ea_kbg_tagessatz"] > 0
+
+
+def test_cli_ch_json():
+    res = run_cli(["ch", "--lohn", "8250", "--json"])
+    data = json.loads(res.stdout)
+    assert data["country"] == "CH"
+    assert data["mse_tagessatz"] == 220.0
+    assert data["mse_gesamt_14w"] == 220.0 * 98

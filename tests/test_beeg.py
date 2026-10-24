@@ -1,120 +1,109 @@
 # -*- coding: utf-8 -*-
+"""
+Tests für das deutsche Elterngeld (BEEG 2026).
+"""
+
 import pytest
-from elterngeld_dach.calculator import (
-    calculate_de_replacement_rate,
-    calculate_germany_elterngeld,
-)
-from elterngeld_dach.rates import (
-    DE_MIN_BASIS_ELTERNGELD,
-    DE_MAX_BASIS_ELTERNGELD,
-    DE_MIN_PLUS_ELTERNGELD,
-    DE_MAX_PLUS_ELTERNGELD,
-)
+from elterngeld_dach.beeg import calculate_beeg, calculate_ersatzrate
+from elterngeld_dach.rates import DE_EINKOMMENSGRENZE_2026
 
 
-def test_standard_replacement_rate():
-    # 1.000 bis 1.200 Euro Netto = 67%
-    assert calculate_de_replacement_rate(1000.0) == 0.67
-    assert calculate_de_replacement_rate(1100.0) == 0.67
-    assert calculate_de_replacement_rate(1200.0) == 0.67
+def test_ersatzrate_standard():
+    # Zwischen 1000 und 1200 Euro: Exakt 67 %
+    assert calculate_ersatzrate(1000.0) == 0.67
+    assert calculate_ersatzrate(1100.0) == 0.67
+    assert calculate_ersatzrate(1200.0) == 0.67
 
 
-def test_low_income_replacement_rate():
-    # Unter 1.000 Euro Netto: je 2 Euro unter 1.000 Euro +0,1%
-    # 900 Euro -> 100 Euro unter 1000 -> 50 * 0,1% = +5% -> 72%
-    assert calculate_de_replacement_rate(900.0) == 0.72
-    # 500 Euro -> 500 Euro unter 1000 -> 250 * 0,1% = +25% -> 92%
-    assert calculate_de_replacement_rate(500.0) == 0.92
-    # 340 Euro -> 660 Euro unter 1000 -> 330 * 0,1% = +33% -> 100%
-    assert calculate_de_replacement_rate(340.0) == 1.00
-    assert calculate_de_replacement_rate(100.0) == 1.00
+def test_ersatzrate_geringverdiener():
+    # Je 2 € unter 1.000 €: +0,1 %-Punkte
+    # 800 €: 200 € drunter / 2 = 100 Schritte * 0.001 = +0.10 -> 0.77 (77%)
+    assert calculate_ersatzrate(800.0) == 0.77
+    # 500 €: 500 € drunter / 2 = 250 Schritte * 0.001 = +0.25 -> 0.92 (92%)
+    assert calculate_ersatzrate(500.0) == 0.92
+    # 340 €: 660 € drunter / 2 = 330 Schritte * 0.001 = +0.33 -> 1.00 (100%)
+    assert calculate_ersatzrate(340.0) == 1.00
+    # 200 €: max 1.00
+    assert calculate_ersatzrate(200.0) == 1.00
 
 
-def test_high_income_replacement_rate():
-    # Über 1.200 Euro Netto: je 20 Euro über 1.200 Euro -0,1% (bis 65%)
-    # 1.400 Euro -> 200 Euro über 1200 -> 10 * 0,1% = -1% -> 66%
-    assert calculate_de_replacement_rate(1400.0) == 0.66
-    # 1.600 Euro -> 400 Euro über 1200 -> 20 * 0,1% = -2% -> 65%
-    assert calculate_de_replacement_rate(1600.0) == 0.65
-    assert calculate_de_replacement_rate(3000.0) == 0.65
+def test_ersatzrate_degressiv():
+    # Je 20 € über 1.200 €: -0,1 %-Punkte bis 65 %
+    # 1220 €: 1 Schritt * 0.001 -> 0.669
+    assert calculate_ersatzrate(1220.0) == 0.669
+    # 1240 €: 2 Schritte -> 0.668
+    assert calculate_ersatzrate(1240.0) == 0.668
+    # 1600 €: 400 / 20 = 20 Schritte * 0.001 = 0.02 -> 0.65
+    assert calculate_ersatzrate(1600.0) == 0.65
+    # 2500 €: gedeckelt auf min 0.65
+    assert calculate_ersatzrate(2500.0) == 0.65
 
 
-def test_basis_elterngeld_caps():
-    # Mindestbetrag 300 Euro bei geringem Einkommen
-    res_min = calculate_germany_elterngeld(net_income_before=200.0)
-    assert res_min["monthly_basis_elterngeld"] == DE_MIN_BASIS_ELTERNGELD
+def test_basiselterngeld_sockel_und_kappung():
+    # Mindestbetrag 300 €
+    res_min = calculate_beeg(netto_voreinkommen=0.0)
+    assert res_min.basis_elterngeld == 300.0
+    assert res_min.elterngeld_plus == 150.0
 
-    # Höchstbetrag 1.800 Euro bei hohem Einkommen
-    res_max = calculate_germany_elterngeld(net_income_before=4000.0)
-    assert res_max["monthly_basis_elterngeld"] == DE_MAX_BASIS_ELTERNGELD
-
-
-def test_sibling_bonus():
-    # 10% Zuschlag, mind. 75 Euro für Basis
-    res = calculate_germany_elterngeld(net_income_before=2000.0, has_qualifying_siblings=True)
-    # Netto 2000 -> Rate 65% -> 1300 Euro -> 10% sind 130 Euro Bonus
-    assert res["sibling_bonus_basis"] == 130.0
-    assert res["monthly_basis_elterngeld"] == 1300.0 + 130.0
-
-    # Mindestbonus 75 Euro bei niedrigem Basis-Elterngeld
-    res_low = calculate_germany_elterngeld(net_income_before=600.0, has_qualifying_siblings=True)
-    assert res_low["sibling_bonus_basis"] == 75.0
+    # Höchstbetrag 1.800 € (bei hohem Netto)
+    res_max = calculate_beeg(netto_voreinkommen=4000.0)
+    assert res_max.basis_elterngeld == 1800.0
+    assert res_max.elterngeld_plus == 900.0
 
 
-def test_multiple_birth_bonus():
-    # Zwillinge: +300 Euro Basis, +150 Euro Plus
-    res = calculate_germany_elterngeld(net_income_before=2000.0, multiple_birth_count=2)
-    assert res["multiples_bonus_basis"] == 300.0
-    assert res["multiples_bonus_plus"] == 150.0
-    assert res["monthly_basis_elterngeld"] == 1300.0 + 300.0
+def test_einkommensgrenze_zve_175k():
+    # Über 175.000 €: Kein Anspruch
+    res_over = calculate_beeg(netto_voreinkommen=5000.0, zve=175001.0)
+    assert not res_over.is_eligible
+    assert res_over.basis_elterngeld == 0.0
+    assert res_over.elterngeld_plus == 0.0
+    assert "175" in res_over.ineligibility_reason
 
-    # Drillinge: +600 Euro Basis
-    res_triplets = calculate_germany_elterngeld(net_income_before=2000.0, multiple_birth_count=3)
-    assert res_triplets["multiples_bonus_basis"] == 600.0
-
-
-def test_income_limit_2026():
-    # Über 175.000 Euro zu versteuerndes Einkommen: Kein Anspruch
-    res_over = calculate_germany_elterngeld(
-        net_income_before=3000.0,
-        taxable_yearly_income=180000.0,
-    )
-    assert res_over["eligible"] is False
-    assert res_over["monthly_basis_elterngeld"] == 0.0
-
-    # Bis 175.000 Euro: Anspruch besteht
-    res_under = calculate_germany_elterngeld(
-        net_income_before=3000.0,
-        taxable_yearly_income=174000.0,
-    )
-    assert res_under["eligible"] is True
+    # Bei 175.000 €: Berechtigt
+    res_ok = calculate_beeg(netto_voreinkommen=3000.0, zve=175000.0)
+    assert res_ok.is_eligible
+    assert res_ok.basis_elterngeld > 0.0
 
 
-def test_part_time_during_parental_leave():
-    # Teilzeit: Nettoverlust wird ausgeglichen
-    res = calculate_germany_elterngeld(
-        net_income_before=2500.0,
-        part_time_net_during=1000.0,
-        part_time_hours_per_week=25.0,
-    )
-    # Verlust: 1500 Euro * 65% = 975 Euro
-    assert res["income_loss"] == 1500.0
-    assert res["monthly_basis_elterngeld"] == 975.0
-    assert res["partnership_bonus_eligible"] is True
+def test_geschwisterbonus():
+    # Netto 2.000 € -> 65 % = 1.300 € Basis
+    # Geschwisterbonus: +10 % = 130 €
+    res = calculate_beeg(netto_voreinkommen=2000.0, has_geschwisterbonus=True)
+    assert res.geschwisterbonus == 130.0
+    assert res.basis_elterngeld == 1430.0
 
-    # Überschreitung 32 Wochenstunden
-    res_invalid_hours = calculate_germany_elterngeld(
-        net_income_before=2500.0,
-        part_time_hours_per_week=35.0,
-    )
-    assert res_invalid_hours["eligible"] is False
+    # Mindestbonus 75 € bei Sockelbetrag
+    res_sockel = calculate_beeg(netto_voreinkommen=300.0, has_geschwisterbonus=True)
+    assert res_sockel.geschwisterbonus == 75.0
+    assert res_sockel.basis_elterngeld == 375.0
 
 
-def test_maternity_benefit_offset():
-    # Mutterschaftsgeld-Anrechnung
-    res = calculate_germany_elterngeld(
-        net_income_before=2000.0,
-        maternity_benefit_monthly=1000.0,
-    )
-    # Basis: 1300 Euro - 1000 Euro = 300 Euro
-    assert res["payout_during_mutterschutz"] == 300.0
+def test_mehrlingszuschlag():
+    # Zwillinge: +300 € Basis, +150 € Plus
+    res_twins = calculate_beeg(netto_voreinkommen=2000.0, mehrlinge_count=2)
+    assert res_twins.mehrlingszuschlag_basis == 300.0
+    assert res_twins.mehrlingszuschlag_plus == 150.0
+    assert res_twins.basis_elterngeld == 1300.0 + 300.0
+
+    # Drillinge: +600 € Basis, +300 € Plus
+    res_triplets = calculate_beeg(netto_voreinkommen=2000.0, mehrlinge_count=3)
+    assert res_triplets.mehrlingszuschlag_basis == 600.0
+    assert res_triplets.mehrlingszuschlag_plus == 300.0
+
+
+def test_teilzeit_ueber_32_stunden():
+    # > 32h schließt Elterngeld für den Monat aus
+    res_tz_over = calculate_beeg(netto_voreinkommen=2500.0, teilzeit_stunden=35.0, teilzeit_netto=1500.0)
+    assert not res_tz_over.is_teilzeit_eligible
+    assert res_tz_over.basis_elterngeld == 0.0
+
+
+def test_teilzeit_im_rahmen():
+    # 20 Stunden mit 1.000 € Netto bei Voreinkommen 2.500 €
+    # Einkommensverlust: 1.500 €
+    # 1.500 € * 65 % = 975 € Basis mit TZ
+    res_tz = calculate_beeg(netto_voreinkommen=2500.0, teilzeit_stunden=20.0, teilzeit_netto=1000.0)
+    assert res_tz.is_teilzeit_eligible
+    assert res_tz.basis_elterngeld == 975.0
+    # Deckelungsbetrag für Plus: 1.625 / 2 = 812.50 €
+    assert res_tz.elterngeld_plus == 812.50
